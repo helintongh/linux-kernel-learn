@@ -6,3 +6,7 @@
 
 #### lvs负载均衡实践与源码分析
 
+### 动态监控及调试技术
+
+[kprobe详解](doc/kprobe/kprobe_detail.md)
+
