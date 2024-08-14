@@ -82,7 +82,7 @@ offsetof(test, c) = 8
 
 ## 2.container_of实现详解
 
-完整代码在 [on github](./src/list_example/)
+完整代码在 [on github](../../src/list_example/)
 
 下面是示例代码片段:
 
