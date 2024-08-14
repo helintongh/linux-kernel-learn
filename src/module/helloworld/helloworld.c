@@ -1,6 +1,6 @@
-# include <linux/init.h>
-# include <linux/kernel.h>
-# include <linux/module.h>
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 
 //内核模块初始化函数
 static int __init lkm_init(void)
