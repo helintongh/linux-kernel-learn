@@ -87,3 +87,320 @@ struct file_operations {
 - `unregister_chrdev_region`
 
 
+## 字符驱动所使用到的API
+
+cdev相关API
+
+```c
+// 动态申请(构造)cdev内存(设备对象)
+struct cdev * cdev_alloc(void);
+// 初始化cdev的成员,并建立cdev和file_operations之间的联系
+void cdev_init(struct cdev *cdev, struct file_operations *fops);
+// 注册cdev设备对象
+int cdev_add(struct cdev *dev, dev_t num, unsigned int count);
+// 将cdev对象从系统中移除(注销)
+void cdev_del(struct cdev *dev);
+// 释放cdev内存
+void cdev_put (struct cdev *p);
+```
+
+设备号获取相关宏
+
+```c
+// 从设备号中提取主设备号
+#define MAJOR(dev)	((unsigned int) ((dev) >> MINORBITS))
+// 从设备号中提取次设备号
+#define MINOR(dev)	((unsigned int) ((dev) & MINORMASK))
+// 将主,次设备号拼凑为设备号
+#define MKDEV(ma,mi)	(((ma) << MINORBITS) | (mi))
+```
+
+申请，释放设备号相关API
+
+```c
+// 静态申请设备号
+int register_chrdev_region (dev_t from, unsigned count, const char *name);
+// 动态申请设备号
+int alloc_chrdev_region (dev_t *dev, unsigned baseminor, unsigned count, const char *name);
+// 释放设备号
+void unregister_chrdev_region (dev_t from, unsigned count);
+```
+
+## 驱动层实际代码
+
+直接看代码吧，字符设备的逻辑很简单的。其具体实现参考注册的`file_operations`即可。
+
+了解了这里就可以看DPDK驱动的驱动了。
+
+```c
+#include <linux/types.h>
+#include <linux/kernel.h>
+#include <linux/delay.h>
+#include <linux/ide.h>
+#include <linux/init.h>
+#include <linux/module.h>
+
+#define CHAR_MAJOR 200 //主设备号
+#define CHAR_NAME "mychardev" //设备名称
+
+static char readbuf[100];
+static char writebuf[100];
+
+//打开设备
+static int chrdev_open(struct inode *inode, struct file *filp)
+{
+  printk(KERN_EMERG"open my char dev");
+  return 0;
+}
+
+
+//用户空间从设备读取数据
+static ssize_t chrdev_read(struct file *filp, char __user *buf,
+                      size_t cnt, loff_t *offt)
+{
+  int ret;
+
+  ret = copy_to_user(buf, readbuf, cnt); //向用户空间拷贝数据
+  if(ret == 0) {
+    printk(KERN_EMERG"kernel send ok");
+  }
+  else {
+    printk(KERN_EMERG"kernel send err");
+  }
+  return;
+}
+//用户空间向设备写数据
+static ssize_t chrdev_write(struct file *filp,
+                      const char __user *buf, size_t cnt, loff_t *offt)
+{
+  int ret;
+  ret = copy_from_user(writebuf, buf, cnt);//从用户空间拷贝数据
+  if(ret == 0) {
+    memcpy(readbuf, writebuf, sizeof(readbuf));
+    printk(KERN_EMERG"kernel recv :%s" ,writebuf);
+  }
+  else {
+    printk(KERN_EMERG"kernel recv err");
+  }
+  return 0;
+}
+//设备释放
+static int chrdev_release(struct inode *inode, struct file *filp)
+{
+  printk(KERN_EMERG"release my char dev");
+  return 0;
+}
+
+//相关操作函数结构体填充
+static struct file_operations chrdev_fops = {
+  .owner = THIS_MODULE,
+  .open = chrdev_open,
+  .read = chrdev_read,
+  .write = chrdev_write,
+  .release = chrdev_release,
+};
+
+static int __init chrdev_init(void)
+{
+  int ret;
+  memcpy(readbuf,”hello i am dev date”,sizeof(“hello i am dev dat”));
+
+  ret = register_chrdev(CHAR_MAJOR,CHAR_NAME,&chrdev_fops); //注册字符设备
+  if(ret == 0) {
+    printk(KERN_EMERG"char dev register failed ！\r\n");
+    return 0;
+  }
+
+  printk(KERN_EMERG"char dev register success ！\r\n");
+}
+
+static void __exit chrdev_exit(void)
+{
+  unregister_chrdev(CHAR_MAJOR,CHAR_NAME); //注销字符设备
+  printk(KERN_EMERG"chr dev exit");
+}
+
+//指定设备驱动入口和出口函数
+module_init(chrdev_init);
+module_exit(chrdev_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("helintong");
+```
+
+核心是
+
+```c
+//相关操作函数结构体填充
+static struct file_operations chrdev_fops = {
+  .owner = THIS_MODULE,
+  .open = chrdev_open,
+  .read = chrdev_read,
+  .write = chrdev_write,
+  .release = chrdev_release,
+};
+```
+
+注:上述实现仅最简单的实现，缺少多线程等支持。
+
+DPDK的网卡驱动注册probe的代码如下:
+
+```c
+static struct rte_pci_driver rte_ixgbe_pmd = {
+	.id_table = pci_id_ixgbe_map,
+	.drv_flags = RTE_PCI_DRV_NEED_MAPPING | RTE_PCI_DRV_INTR_LSC,
+	.probe = eth_ixgbe_pci_probe,
+	.remove = eth_ixgbe_pci_remove,
+};
+```
+
+和字符驱动十分类似，硬件的软驱动基本都是这样实现的。
+
+## 应用层代码
+
+直接看代码吧，应用层代码就是调用linux提供的系统api来读写设备。
+
+```c
+#include <stdio.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char usrdata[] = {"usr data!"};
+
+int main(int argc, char *argv[])
+{
+  int fd, retvalue;
+  char *filename;
+  char readbuf[100], writebuf[100];
+
+  if(argc != 4) {
+    printf("Error Usage!\r\n");
+    return -1;
+  }
+
+  filename = argv[1];
+  /* 打开驱动文件 */
+
+  fd = open(filename, O_RDWR);
+
+  if(fd < 0) {
+    printf("Can't open file %s\r\n", filename);
+    return -1;
+  }
+
+  if(atoi(argv[2]) == 1) { /* 从驱动文件读取数据 */
+    retvalue = read(fd, readbuf, 50);
+    if(retvalue < 0) {
+      printf("read file %s failed!\r\n", filename);
+    }
+    else {
+      printf("read data:%s\r\n",readbuf);
+    }
+  }
+
+  if(atoi(argv[2]) == 2) {
+    /* 向设备驱动写数据 */
+    memcpy(writebuf, argv[3], sizeof(argv[3]));
+    retvalue = write(fd, writebuf, sizeof(argv[3]));
+
+    if(retvalue < 0) {
+      printf("write file %s failed!\r\n", filename);
+    }
+  }
+  /* 关闭设备 */
+  retvalue = close(fd);
+
+  if(retvalue < 0) {
+    printf("Can't close file %s\r\n", filename);
+    return -1;
+  }
+
+  return 0;
+}
+```
+
+## 编译
+
+驱动的编译文件如下:
+
+```Makefile
+#Makefile文件注意：假如前面的.c文件起名为first.c，那么这里的Makefile文件中的.o文
+#件就要起名为first.o    只有root用户才能加载和卸载模块
+obj-m:=mychar_dev.o                          #产生mychar_dev模块的目标文件
+#目标文件  文件  要与模块名字相同
+CURRENT_PATH:=$(shell pwd)             #模块所在的当前路径
+LINUX_KERNEL:=$(shell uname -r)        #linux内核代码的当前版本
+LINUX_KERNEL_PATH:=/usr/src/linux-headers-$(LINUX_KERNEL)
+
+all:
+	make -C $(LINUX_KERNEL_PATH) M=$(CURRENT_PATH) modules    #编译模块
+#[Tab]              内核的路径       当前目录编译完放哪  表明编译的是内核模块
+
+clean:
+	make -C $(LINUX_KERNEL_PATH) M=$(CURRENT_PATH) clean      #清理模块
+```
+
+应用程序的编译:
+
+```shell
+gcc -o usermode write_read_usermode.c
+```
+
+## 加载与使用
+
+
+1. 加载字符设备驱动
+
+```shell
+# 加载字符设备驱动
+insmod mychar_dev.ko
+```
+
+2. 查看驱动列表是否加载成功
+
+```shell
+cat /proc/devices
+```
+
+![](./resource/cat_devices.png)
+
+结果如上图可以看到设备号为200的已经完成注册了。
+
+3. 创建节点
+
+```shell
+# mknod [OPTION] NAME TYPE [MAJOR MINOR]
+# 该命令核心参数是type和最后两个数字，
+# type存在c表示字符，b表示块，p表示管道
+# MAJOR和MINOR代表主设备号和次设备号
+mknod /dev/mychar c 200 0
+```
+
+mknod 对于创建与硬件或虚拟设备交互的设备文件至关重要。如果没有这些文件，应用程序和系统实现将无法与硬件进行通信。
+
+4. 应用程序使用
+
+```shell
+# 写入Hello
+./usermode /dev/mychar 2 Hello
+# 输出现在存入字符驱动的字符
+./usermode /dev/mychar 1 1
+# 写入World
+./usermode /dev/mychar 2 World
+# 输出现在存入字符驱动的字符
+./usermode /dev/mychar 1 1
+```
+
+4. 查看内核输出
+
+![](resource/dmesg_for_char.png)
+
+# 总结
+
+实现一个最简单的字符驱动设备的关键在于实现`file_operations`中的各种函数。
+
+注:上述没办法作为真正的字符驱动，因为根本没计算文件偏移，也没有做可读或不可读等判断也没有加锁(等待队列)等机制。
